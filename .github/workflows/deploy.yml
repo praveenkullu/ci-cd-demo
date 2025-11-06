@@ -1,38 +1,79 @@
-name: CI/CD Pipeline
+name: CI/CD Pipeline - Independent Service Deployment
 
 on:
   push:
     branches:
       - main
       - 'claude/**'
+    paths:
+      - 'services/**'
+      - '.github/workflows/**'
   pull_request:
     branches:
       - main
+    paths:
+      - 'services/**'
+      - '.github/workflows/**'
   workflow_dispatch:
+    inputs:
+      services:
+        description: 'Services to deploy (comma-separated: api-gateway,user-service,product-service,order-service,notification-service or "all")'
+        required: true
+        default: 'all'
 
 env:
   AWS_REGION: us-east-1
   ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com
 
 jobs:
-  build-and-deploy:
-    name: Build and Deploy Microservices
+  # Detect which services have changed
+  detect-changes:
+    name: Detect Changed Services
     runs-on: ubuntu-latest
+    outputs:
+      api-gateway: ${{ steps.filter.outputs.api-gateway }}
+      user-service: ${{ steps.filter.outputs.user-service }}
+      product-service: ${{ steps.filter.outputs.product-service }}
+      order-service: ${{ steps.filter.outputs.order-service }}
+      notification-service: ${{ steps.filter.outputs.notification-service }}
+      any-service-changed: ${{ steps.filter.outputs.changes != '[]' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    strategy:
-      matrix:
-        service:
-          - name: api-gateway
-            port: 3000
-          - name: user-service
-            port: 3001
-          - name: product-service
-            port: 3002
-          - name: order-service
-            port: 3003
-          - name: notification-service
-            port: 3004
+      - name: Check for changed files
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            api-gateway:
+              - 'services/api-gateway/**'
+            user-service:
+              - 'services/user-service/**'
+            product-service:
+              - 'services/product-service/**'
+            order-service:
+              - 'services/order-service/**'
+            notification-service:
+              - 'services/notification-service/**'
 
+      - name: Display changed services
+        run: |
+          echo "Changed services:"
+          echo "  API Gateway: ${{ steps.filter.outputs.api-gateway }}"
+          echo "  User Service: ${{ steps.filter.outputs.user-service }}"
+          echo "  Product Service: ${{ steps.filter.outputs.product-service }}"
+          echo "  Order Service: ${{ steps.filter.outputs.order-service }}"
+          echo "  Notification Service: ${{ steps.filter.outputs.notification-service }}"
+
+  # API Gateway
+  deploy-api-gateway:
+    name: Deploy API Gateway
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: |
+      (needs.detect-changes.outputs.api-gateway == 'true') ||
+      (github.event_name == 'workflow_dispatch' && (contains(github.event.inputs.services, 'all') || contains(github.event.inputs.services, 'api-gateway')))
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -45,48 +86,268 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
-        id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build Docker image
-        working-directory: ./services/${{ matrix.service.name }}
+      - name: Build, tag, and push image
+        working-directory: ./services/api-gateway
         run: |
-          docker build -t ${{ matrix.service.name }}:${{ github.sha }} .
-          docker tag ${{ matrix.service.name }}:${{ github.sha }} ${{ env.ECR_REGISTRY }}/${{ matrix.service.name }}:${{ github.sha }}
-          docker tag ${{ matrix.service.name }}:${{ github.sha }} ${{ env.ECR_REGISTRY }}/${{ matrix.service.name }}:latest
+          echo "Building API Gateway..."
+          docker build -t api-gateway:${{ github.sha }} .
+          docker tag api-gateway:${{ github.sha }} ${{ env.ECR_REGISTRY }}/api-gateway:${{ github.sha }}
+          docker tag api-gateway:${{ github.sha }} ${{ env.ECR_REGISTRY }}/api-gateway:latest
 
-      - name: Push image to Amazon ECR
-        run: |
-          docker push ${{ env.ECR_REGISTRY }}/${{ matrix.service.name }}:${{ github.sha }}
-          docker push ${{ env.ECR_REGISTRY }}/${{ matrix.service.name }}:latest
+          echo "Pushing to ECR..."
+          docker push ${{ env.ECR_REGISTRY }}/api-gateway:${{ github.sha }}
+          docker push ${{ env.ECR_REGISTRY }}/api-gateway:latest
 
-      - name: Deploy to Amazon ECS
+      - name: Deploy to ECS
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/claude/')
         run: |
-          # Update ECS service to use new image
-          # Note: This requires ECS service to be already created
+          echo "Deploying API Gateway to ECS..."
           aws ecs update-service \
             --cluster ${{ secrets.ECS_CLUSTER }} \
-            --service ${{ matrix.service.name }}-service \
+            --service api-gateway-service \
             --force-new-deployment \
             --region ${{ env.AWS_REGION }} || echo "Service not found or not configured yet"
 
-  health-check:
-    name: Health Check Services
+  # User Service
+  deploy-user-service:
+    name: Deploy User Service
     runs-on: ubuntu-latest
-    needs: build-and-deploy
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/claude/')
-
+    needs: detect-changes
+    if: |
+      (needs.detect-changes.outputs.user-service == 'true') ||
+      (github.event_name == 'workflow_dispatch' && (contains(github.event.inputs.services, 'all') || contains(github.event.inputs.services, 'user-service')))
     steps:
-      - name: Wait for deployment
-        run: sleep 60
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Check deployment status
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image
+        working-directory: ./services/user-service
         run: |
-          echo "Deployment completed. Check AWS ECS Console for service health."
-          echo "Services deployed:"
-          echo "  - api-gateway-service"
-          echo "  - user-service-service"
-          echo "  - product-service-service"
-          echo "  - order-service-service"
-          echo "  - notification-service-service"
+          echo "Building User Service..."
+          docker build -t user-service:${{ github.sha }} .
+          docker tag user-service:${{ github.sha }} ${{ env.ECR_REGISTRY }}/user-service:${{ github.sha }}
+          docker tag user-service:${{ github.sha }} ${{ env.ECR_REGISTRY }}/user-service:latest
+
+          echo "Pushing to ECR..."
+          docker push ${{ env.ECR_REGISTRY }}/user-service:${{ github.sha }}
+          docker push ${{ env.ECR_REGISTRY }}/user-service:latest
+
+      - name: Deploy to ECS
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/claude/')
+        run: |
+          echo "Deploying User Service to ECS..."
+          aws ecs update-service \
+            --cluster ${{ secrets.ECS_CLUSTER }} \
+            --service user-service-service \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }} || echo "Service not found or not configured yet"
+
+  # Product Service
+  deploy-product-service:
+    name: Deploy Product Service
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: |
+      (needs.detect-changes.outputs.product-service == 'true') ||
+      (github.event_name == 'workflow_dispatch' && (contains(github.event.inputs.services, 'all') || contains(github.event.inputs.services, 'product-service')))
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image
+        working-directory: ./services/product-service
+        run: |
+          echo "Building Product Service..."
+          docker build -t product-service:${{ github.sha }} .
+          docker tag product-service:${{ github.sha }} ${{ env.ECR_REGISTRY }}/product-service:${{ github.sha }}
+          docker tag product-service:${{ github.sha }} ${{ env.ECR_REGISTRY }}/product-service:latest
+
+          echo "Pushing to ECR..."
+          docker push ${{ env.ECR_REGISTRY }}/product-service:${{ github.sha }}
+          docker push ${{ env.ECR_REGISTRY }}/product-service:latest
+
+      - name: Deploy to ECS
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/claude/')
+        run: |
+          echo "Deploying Product Service to ECS..."
+          aws ecs update-service \
+            --cluster ${{ secrets.ECS_CLUSTER }} \
+            --service product-service-service \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }} || echo "Service not found or not configured yet"
+
+  # Order Service
+  deploy-order-service:
+    name: Deploy Order Service
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: |
+      (needs.detect-changes.outputs.order-service == 'true') ||
+      (github.event_name == 'workflow_dispatch' && (contains(github.event.inputs.services, 'all') || contains(github.event.inputs.services, 'order-service')))
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image
+        working-directory: ./services/order-service
+        run: |
+          echo "Building Order Service..."
+          docker build -t order-service:${{ github.sha }} .
+          docker tag order-service:${{ github.sha }} ${{ env.ECR_REGISTRY }}/order-service:${{ github.sha }}
+          docker tag order-service:${{ github.sha }} ${{ env.ECR_REGISTRY }}/order-service:latest
+
+          echo "Pushing to ECR..."
+          docker push ${{ env.ECR_REGISTRY }}/order-service:${{ github.sha }}
+          docker push ${{ env.ECR_REGISTRY }}/order-service:latest
+
+      - name: Deploy to ECS
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/claude/')
+        run: |
+          echo "Deploying Order Service to ECS..."
+          aws ecs update-service \
+            --cluster ${{ secrets.ECS_CLUSTER }} \
+            --service order-service-service \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }} || echo "Service not found or not configured yet"
+
+  # Notification Service
+  deploy-notification-service:
+    name: Deploy Notification Service
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: |
+      (needs.detect-changes.outputs.notification-service == 'true') ||
+      (github.event_name == 'workflow_dispatch' && (contains(github.event.inputs.services, 'all') || contains(github.event.inputs.services, 'notification-service')))
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image
+        working-directory: ./services/notification-service
+        run: |
+          echo "Building Notification Service..."
+          docker build -t notification-service:${{ github.sha }} .
+          docker tag notification-service:${{ github.sha }} ${{ env.ECR_REGISTRY }}/notification-service:${{ github.sha }}
+          docker tag notification-service:${{ github.sha }} ${{ env.ECR_REGISTRY }}/notification-service:latest
+
+          echo "Pushing to ECR..."
+          docker push ${{ env.ECR_REGISTRY }}/notification-service:${{ github.sha }}
+          docker push ${{ env.ECR_REGISTRY }}/notification-service:latest
+
+      - name: Deploy to ECS
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/claude/')
+        run: |
+          echo "Deploying Notification Service to ECS..."
+          aws ecs update-service \
+            --cluster ${{ secrets.ECS_CLUSTER }} \
+            --service notification-service-service \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }} || echo "Service not found or not configured yet"
+
+  # Summary
+  deployment-summary:
+    name: Deployment Summary
+    runs-on: ubuntu-latest
+    needs:
+      - detect-changes
+      - deploy-api-gateway
+      - deploy-user-service
+      - deploy-product-service
+      - deploy-order-service
+      - deploy-notification-service
+    if: always()
+    steps:
+      - name: Generate summary
+        run: |
+          echo "# Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Services Deployed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [[ "${{ needs.deploy-api-gateway.result }}" == "success" ]]; then
+            echo "- ✅ API Gateway" >> $GITHUB_STEP_SUMMARY
+          elif [[ "${{ needs.deploy-api-gateway.result }}" == "skipped" ]]; then
+            echo "- ⏭️  API Gateway (skipped - no changes)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- ❌ API Gateway (failed)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [[ "${{ needs.deploy-user-service.result }}" == "success" ]]; then
+            echo "- ✅ User Service" >> $GITHUB_STEP_SUMMARY
+          elif [[ "${{ needs.deploy-user-service.result }}" == "skipped" ]]; then
+            echo "- ⏭️  User Service (skipped - no changes)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- ❌ User Service (failed)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [[ "${{ needs.deploy-product-service.result }}" == "success" ]]; then
+            echo "- ✅ Product Service" >> $GITHUB_STEP_SUMMARY
+          elif [[ "${{ needs.deploy-product-service.result }}" == "skipped" ]]; then
+            echo "- ⏭️  Product Service (skipped - no changes)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- ❌ Product Service (failed)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [[ "${{ needs.deploy-order-service.result }}" == "success" ]]; then
+            echo "- ✅ Order Service" >> $GITHUB_STEP_SUMMARY
+          elif [[ "${{ needs.deploy-order-service.result }}" == "skipped" ]]; then
+            echo "- ⏭️  Order Service (skipped - no changes)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- ❌ Order Service (failed)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [[ "${{ needs.deploy-notification-service.result }}" == "success" ]]; then
+            echo "- ✅ Notification Service" >> $GITHUB_STEP_SUMMARY
+          elif [[ "${{ needs.deploy-notification-service.result }}" == "skipped" ]]; then
+            echo "- ⏭️  Notification Service (skipped - no changes)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- ❌ Notification Service (failed)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Deployment Details" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit SHA**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch**: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Triggered by**: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
