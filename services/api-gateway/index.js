@@ -32,7 +32,7 @@ app.get('/health', (req, res) => {
 // Root endpoint
 app.get('/', (req, res) => {
   res.json({
-    message: 'Welcome to Microservices API Gateway v2',
+    message: 'Welcome to Microservices API Gateway v4',
     version: '1.0.0',
     endpoints: {
       users: '/api/users',
